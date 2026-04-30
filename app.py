@@ -24,18 +24,30 @@ st.set_page_config(page_title="FipeZap · Curitiba", page_icon="🏠", layout="w
 
 st.markdown("""
 <style>
-    .metric-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.2rem; text-align: center; }
-    .metric-card .label { font-size: .8rem; color: #64748b; text-transform: uppercase; }
-    .metric-card .value { font-size: 1.8rem; font-weight: 700; color: #0f2027; }
+    @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Sans:wght@300;400;500&display=swap');
+    html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
+    h1, h2, h3 { font-family: 'Syne', sans-serif; }
+    .hero { background: linear-gradient(135deg, #0f2027, #203a43, #2c5364); border-radius: 16px; padding: 2.5rem 2rem; margin-bottom: 2rem; color: white; }
+    .hero h1 { font-size: 2.4rem; font-weight: 800; margin: 0 0 .4rem; }
+    .hero p  { font-size: 1rem; opacity: .75; margin: 0; }
+    .metric-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.2rem 1.5rem; text-align: center; }
+    .metric-card .label { font-size: .8rem; color: #64748b; text-transform: uppercase; letter-spacing: .08em; }
+    .metric-card .value { font-size: 1.8rem; font-weight: 700; font-family: 'Syne', sans-serif; color: #0f2027; }
+    div[data-testid="stButton"] button { background: linear-gradient(135deg, #203a43, #2c5364); color: white; border: none; padding: .6rem 2rem; font-weight: 600; border-radius: 8px; font-size: 1rem; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏠 Extração FipeZap - Curitiba")
+st.markdown("""
+<div class="hero">
+    <h1>🏠 FipeZap · Curitiba</h1>
+    <p>Extração automatizada do Índice FipeZap — Leitura direta do HTML</p>
+</div>
+""", unsafe_allow_html=True)
 
-# ─── Scraping com Captura de Tela ───────────────────────────────────────────
+# ─── Scraping Direto no DOM Principal ───────────────────────────────────────
 async def extrair_fipe_curitiba(info_type: str, log_container, image_container):
     async with async_playwright() as p:
-        log_container.info("🚀 Iniciando o navegador Chromium...")
+        log_container.info("🚀 Iniciando Chromium...")
         browser = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
@@ -43,66 +55,63 @@ async def extrair_fipe_curitiba(info_type: str, log_container, image_container):
         
         page = await browser.new_page(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800} # Define um tamanho fixo para a foto ficar boa
+            viewport={"width": 1280, "height": 800}
         )
         
         try:
-            log_container.info("🌐 Acessando a página da FIPE...")
+            log_container.info("🌐 Acessando FIPE...")
             await page.goto("https://www.fipe.org.br/pt-br/indices/fipezap/#indice-mensal", wait_until="networkidle", timeout=60_000)
 
-            # Preenchimento
-            log_container.info("🖱️ Preenchendo Tipo: Venda...")
+            # Preenchimento com pausas forçadas de 1.5s
+            log_container.info("🖱️ 1/4 - Selecionando Tipo: Venda...")
             await page.wait_for_selector("#Tipo_chosen", timeout=20_000)
             await page.click("#Tipo_chosen")
             await page.locator("#Tipo_chosen .chosen-results li").get_by_text("Venda", exact=True).click()
-            await page.wait_for_timeout(800) # Aumentei levemente as pausas
+            await page.wait_for_timeout(1500)
 
-            log_container.info(f"🖱️ Preenchendo Informação: {info_type}...")
+            log_container.info(f"🖱️ 2/4 - Selecionando Informação: {info_type}...")
             await page.click("#Info_chosen")
             await page.locator("#Info_chosen .chosen-results li").get_by_text(info_type, exact=True).click()
-            await page.wait_for_timeout(800)
+            await page.wait_for_timeout(1500)
 
-            log_container.info("📍 Preenchendo Região: Curitiba...")
+            log_container.info("📍 3/4 - Selecionando Região: Curitiba...")
             await page.click("#Regiao_chosen")
             await page.locator("#Regiao_chosen input").fill("Curitiba")
+            await page.wait_for_timeout(500) # Pausa rápida para a busca do site renderizar a lista
             await page.locator("#Regiao_chosen .chosen-results li").get_by_text("Curitiba", exact=True).click()
-            await page.wait_for_timeout(800)
+            await page.wait_for_timeout(1500)
 
-            log_container.info("🛏️ Preenchendo Dormitórios: Todos...")
+            log_container.info("🛏️ 4/4 - Selecionando Dormitórios: Todos...")
             await page.click("#Dormitorios_chosen")
             await page.locator("#Dormitorios_chosen .chosen-results li").get_by_text("Todos", exact=True).click()
-            await page.wait_for_timeout(800)
+            await page.wait_for_timeout(1500)
 
-            # --- O PULO DO GATO: CAPTURA DE TELA AQUI ---
-            log_container.info("📸 Tirando print de verificação...")
+            log_container.info("📸 Verificando preenchimento...")
             screenshot_bytes = await page.screenshot(full_page=True)
-            image_container.image(screenshot_bytes, caption="VISÃO DO ROBÔ: Formulário instantes antes do clique na pesquisa")
+            image_container.image(screenshot_bytes, caption="Formulário preenchido. Iniciando pesquisa...")
 
-            log_container.info("🔍 Clicando em Pesquisar (forçando o clique caso algo esteja na frente)...")
-            await page.click("#buttonPesquisar", force=True) # force=True ignora se algo estiver cobrindo o botão
+            log_container.info("🔍 Pesquisando resultados...")
+            await page.click("#buttonPesquisar", force=True)
             
-            log_container.info("⏳ Aguardando tabela...")
-            await page.wait_for_selector("div.actions a:has-text('Imprimir')", state="visible", timeout=30_000)
-            await page.wait_for_timeout(1_200)
+            log_container.info("⏳ Aguardando renderização das tabelas no HTML...")
+            # Aguarda especificamente as tabelas de resultado aparecerem no DOM
+            await page.wait_for_selector("table.results", state="visible", timeout=30_000)
+            await page.wait_for_timeout(2000) # Tempo de segurança para o DOM terminar de injetar todos os anos
 
-            async with page.expect_popup() as popup_info:
-                botao = page.locator("div.actions a:has-text('Imprimir')")
-                await botao.click(force=True)
+            log_container.info("✅ Extraindo tabelas diretamente da página principal...")
+            html_content = await page.content()
 
-            print_page = await popup_info.value
-            await print_page.wait_for_load_state("networkidle", timeout=20_000)
-            html_content = await print_page.content()
-
-            tabelas = pd.read_html(io.StringIO(html_content))
+            # Extrai apenas as tabelas que contêm a classe CSS 'results'
+            tabelas = pd.read_html(io.StringIO(html_content), attrs={"class": "results"})
+            
             await browser.close()
             log_container.empty()
             return tabelas
 
         except Exception as e:
-            # Se der erro, tira outro print para vermos a tela de erro da FIPE
-            log_container.error("Erro detectado. Capturando a tela final...")
+            log_container.error("Falha na extração. Capturando estado atual do navegador...")
             erro_bytes = await page.screenshot(full_page=True)
-            image_container.image(erro_bytes, caption="VISÃO DO ROBÔ: Momento em que o erro ocorreu")
+            image_container.image(erro_bytes, caption="Tela no momento da falha")
             await browser.close()
             raise e
 
@@ -112,12 +121,11 @@ with st.sidebar:
 
 run = st.button("🔍 Extrair dados agora", use_container_width=True, type="primary")
 
-# Espaços reservados para atualizar a interface durante o processo assíncrono
 log_placeholder = st.empty()
 image_placeholder = st.empty()
 
 if run:
-    with st.spinner("Executando automação..."):
+    with st.spinner("Executando automação via Playwright..."):
         try:
             tabelas = asyncio.run(extrair_fipe_curitiba(info_type, log_placeholder, image_placeholder))
         except Exception as e:
@@ -126,4 +134,36 @@ if run:
 
     if tabelas:
         st.success(f"✅ {len(tabelas)} tabela(s) capturada(s)!")
-        st.dataframe(tabelas[0], use_container_width=True)
+
+        df_total = pd.concat(tabelas, ignore_index=True)
+        m1, m2, m3 = st.columns(3)
+        for col, label, val in zip(
+            [m1, m2, m3],
+            ["Total de Tabelas", "Linhas Totais", "Colunas"],
+            [len(tabelas), len(df_total), df_total.shape[1]],
+        ):
+            with col:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="label">{label}</div>
+                    <div class="value">{val}</div>
+                </div>""", unsafe_allow_html=True)
+
+        st.markdown("---")
+        for i, t in enumerate(tabelas):
+            # O site ordena por ano decrescente, o primeiro item costuma ser o ano atual
+            ano_estimado = 2026 - i 
+            with st.expander(f"📋 Dados do ano ~{ano_estimado} (Tabela {i + 1})", expanded=(i == 0)):
+                st.dataframe(t, use_container_width=True)
+                
+        st.markdown("---")
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            for i, t in enumerate(tabelas):
+                t.to_excel(writer, sheet_name=f"Tabela_{i + 1}", index=False)
+        st.download_button(
+            label="⬇️ Baixar todas as tabelas (Excel)",
+            data=buf.getvalue(),
+            file_name="fipezap_curitiba_completo.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
