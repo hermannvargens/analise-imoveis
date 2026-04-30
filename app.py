@@ -6,49 +6,20 @@ import subprocess
 import sys
 import matplotlib.pyplot as plt
 from statsmodels.tsa.seasonal import seasonal_decompose
-from statsmodels.tsa.stattools import adfuller
-from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from playwright.async_api import async_playwright
 
-# ─── Instala o Chromium na primeira execução ────────────────────────────────
-@st.cache_resource(show_spinner="⚙️ Instalando Chromium (apenas na primeira execução)...")
+# ─── Instalação do Chromium ──────────────────────────────────────────────────
+@st.cache_resource(show_spinner="⚙️ Preparando ambiente (Chromium)...")
 def install_chromium():
     result = subprocess.run(
         [sys.executable, "-m", "playwright", "install", "chromium"],
         capture_output=True, text=True
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"Falha ao instalar Chromium:\n{result.stderr}")
     return True
 
 install_chromium()
 
-# ─── Page config ────────────────────────────────────────────────────────────
-st.set_page_config(page_title="FipeZap · Curitiba", page_icon="🏠", layout="wide")
-
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Sans:wght@300;400;500&display=swap');
-    html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-    h1, h2, h3 { font-family: 'Syne', sans-serif; }
-    .hero { background: linear-gradient(135deg, #0f2027, #203a43, #2c5364); border-radius: 16px; padding: 2.5rem 2rem; margin-bottom: 2rem; color: white; }
-    .hero h1 { font-size: 2.4rem; font-weight: 800; margin: 0 0 .4rem; }
-    .hero p  { font-size: 1rem; opacity: .75; margin: 0; }
-    .metric-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.2rem 1.5rem; text-align: center; }
-    .metric-card .label { font-size: .8rem; color: #64748b; text-transform: uppercase; letter-spacing: .08em; }
-    .metric-card .value { font-size: 1.8rem; font-weight: 700; font-family: 'Syne', sans-serif; color: #0f2027; }
-    div[data-testid="stButton"] button { background: linear-gradient(135deg, #203a43, #2c5364); color: white; border: none; padding: .6rem 2rem; font-weight: 600; border-radius: 8px; font-size: 1rem; }
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<div class="hero">
-    <h1>🏠 FipeZap · Curitiba</h1>
-    <p>Extração automatizada e Análise Exploratória de Série Temporal</p>
-</div>
-""", unsafe_allow_html=True)
-
-# ─── Funções de Processamento ───────────────────────────────────────────────
+# ─── Funções de Scraping e Limpeza ──────────────────────────────────────────
 def limpar_dados_fipe(lista_tabelas):
     dfs_processados = []
     meses_map = {
@@ -58,185 +29,151 @@ def limpar_dados_fipe(lista_tabelas):
     ano_corrente = 2026
     
     for df in lista_tabelas:
-        if df.empty or df.shape[1] < 2:
-            continue
-        temp_df = df.copy()
-        temp_df = temp_df.iloc[:, [0, 1]]
+        if df.empty or df.shape[1] < 2: continue
+        temp_df = df.copy().iloc[:, [0, 1]]
         temp_df.columns = ['mes_str', 'valor']
         temp_df['mes_num'] = temp_df['mes_str'].astype(str).str.lower().str.strip().map(meses_map)
         temp_df = temp_df.dropna(subset=['mes_num'])
-        if temp_df.empty:
-            continue
-        temp_df['mes_num'] = temp_df['mes_num'].astype(int)
+        if temp_df.empty: continue
         temp_df['Ano'] = ano_corrente
         dfs_processados.append(temp_df)
         ano_corrente -= 1 
 
-    if not dfs_processados:
-        raise ValueError("Nenhuma tabela válida de dados foi encontrada após a filtragem.")
-
     df_final = pd.concat(dfs_processados, ignore_index=True)
     df_final['data'] = pd.to_datetime(df_final['Ano'].astype(str) + '-' + df_final['mes_num'].astype(str) + '-01')
-    
-    df_series = df_final[['data', 'valor']].copy()
-    df_series = df_series.sort_values('data').reset_index(drop=True)
+    df_series = df_final[['data', 'valor']].sort_values('data').reset_index(drop=True)
     df_series.columns = ['data', 'indice']
-    
     df_series['indice'] = df_series['indice'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
     df_series['indice'] = df_series['indice'].str.extract(r'(\d+\.?\d*)').astype(float)
-    
     return df_series
 
-async def extrair_fipe_curitiba(info_type: str, log_container):
+async def extrair_fipe_curitiba(log_container):
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
-        )
-        page = await browser.new_page(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        )
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu", "--single-process"])
+        page = await browser.new_page(user_agent="Mozilla/5.0")
         try:
-            await page.goto("https://www.fipe.org.br/pt-br/indices/fipezap/#indice-mensal", wait_until="networkidle", timeout=60_000)
-
-            await page.wait_for_selector("#Tipo_chosen", timeout=20_000)
+            await page.goto("https://www.fipe.org.br/pt-br/indices/fipezap/#indice-mensal", wait_until="networkidle")
+            
+            # Preenchimento padrão (Venda / Número Índice / Curitiba / Todos)
             await page.click("#Tipo_chosen")
             await page.locator("#Tipo_chosen .chosen-results li").get_by_text("Venda", exact=True).click()
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(800)
 
             await page.click("#Info_chosen")
-            await page.locator("#Info_chosen .chosen-results li").get_by_text(info_type, exact=True).click()
-            await page.wait_for_timeout(1000)
+            await page.locator("#Info_chosen .chosen-results li").get_by_text("Número Índice", exact=True).click()
+            await page.wait_for_timeout(800)
 
             await page.click("#Regiao_chosen")
             await page.locator("#Regiao_chosen input").fill("Curitiba")
-            await page.wait_for_timeout(500) 
+            await page.wait_for_timeout(500)
             await page.locator("#Regiao_chosen .chosen-results li").get_by_text("Curitiba", exact=True).click()
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(800)
 
             await page.click("#Dormitorios_chosen")
             await page.locator("#Dormitorios_chosen .chosen-results li").get_by_text("Todos", exact=True).click()
-            await page.wait_for_timeout(1000)
-
-            log_container.info("🔍 Processando pesquisa na FIPE...")
+            
+            log_container.info("🔍 Consultando base FIPE...")
             await page.click("#buttonPesquisar", force=True)
-            
             await page.wait_for_selector("table.results", state="visible", timeout=30_000)
-            await page.wait_for_timeout(2000) 
-
-            html_content = await page.content()
-            tabelas = pd.read_html(io.StringIO(html_content), attrs={"class": "results"})
             
+            html = await page.content()
             await browser.close()
-            log_container.empty()
-            return tabelas
-
+            return pd.read_html(io.StringIO(html), attrs={"class": "results"})
         except Exception as e:
             await browser.close()
             raise e
 
-# ─── Interface ──────────────────────────────────────────────────────────────
+# ─── Configuração de Página e Sidebar ────────────────────────────────────────
+st.set_page_config(page_title="FipeZap Analytics", page_icon="🏠", layout="wide")
+
 with st.sidebar:
-    info_type = st.selectbox("Tipo de informação", ["Número Índice", "Variação Mensal"])
+    st.title("🏠 Menu")
+    app_mode = st.radio("Selecione uma etapa:", ["Extração", "Análise Exploratória (EDA)", "Modelagem"])
+    st.markdown("---")
+    st.info("Foco: Curitiba | Venda | Número Índice")
 
-run = st.button("🔍 Extrair e Processar Dados", use_container_width=True, type="primary")
-log_placeholder = st.empty()
+# Inicialização de estado para os dados
+if 'df_fipe' not in st.session_state:
+    st.session_state.df_fipe = None
 
-if run:
-    with st.spinner("Executando extração. Isso pode levar cerca de 10 segundos..."):
-        try:
-            tabelas_brutas = asyncio.run(extrair_fipe_curitiba(info_type, log_placeholder))
-        except Exception as e:
-            st.error(f"❌ Erro: {e}")
-            tabelas_brutas = None
+# ─── ETAPA 1: EXTRAÇÃO ───────────────────────────────────────────────────────
+if app_mode == "Extração":
+    st.markdown('<div style="background: linear-gradient(135deg, #0f2027, #203a43); padding: 2rem; border-radius: 15px; color: white;"><h1>Extração de Dados</h1><p>Obtenção automática dos dados brutos do portal FipeZap.</p></div>', unsafe_allow_html=True)
+    
+    col_btn, _ = st.columns([2, 5])
+    with col_btn:
+        btn_extract = st.button("🚀 Iniciar Scraping", use_container_width=True, type="primary")
+    
+    log_place = st.empty()
+    
+    if btn_extract:
+        with st.spinner("Conectando ao portal FIPE..."):
+            try:
+                tabelas = asyncio.run(extrair_fipe_curitiba(log_place))
+                st.session_state.df_fipe = limpar_dados_fipe(tabelas)
+                st.success("Dados extraídos e estruturados com sucesso!")
+            except Exception as e:
+                st.error(f"Erro na extração: {e}")
 
-    if tabelas_brutas:
-        df_temporal = limpar_dados_fipe(tabelas_brutas)
+    if st.session_state.df_fipe is not None:
+        st.subheader("Visualização dos Dados Estruturados")
+        st.dataframe(st.session_state.df_fipe, use_container_width=True)
+        csv = st.session_state.df_fipe.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇️ Baixar CSV", csv, "fipe_curitiba.csv", "text/csv")
+    else:
+        st.warning("Aguardando extração para exibir dados.")
+
+# ─── ETAPA 2: EDA ────────────────────────────────────────────────────────────
+elif app_mode == "Análise Exploratória (EDA)":
+    st.markdown('<div style="background: linear-gradient(135deg, #2c3e50, #000000); padding: 2rem; border-radius: 15px; color: white;"><h1>Análise Exploratória</h1><p>Decomposição, Sazonalidade e Tendência.</p></div>', unsafe_allow_html=True)
+    
+    if st.session_state.df_fipe is not None:
+        df = st.session_state.df_fipe.set_index('data')
         
-        # Prepara a série temporal com index datetime para o Statsmodels
-        df_ts = df_temporal.set_index('data')
-        
-        st.success("✅ Extração e estruturação concluídas!")
+        # Métricas Rápidas
+        var_total = (df['indice'].iloc[-1] / df['indice'].iloc[0] - 1) * 100
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Início da Série", df.index.min().strftime('%m/%Y'))
+        m2.metric("Fim da Série", df.index.max().strftime('%m/%Y'))
+        m3.metric("Variação Acumulada", f"{var_total:.2f}%")
 
-        # ─── Separa a visualização em Abas ───
-        tab1, tab2 = st.tabs(["📊 Dados Brutos", "📈 Análise Exploratória (EDA)"])
+        st.markdown("### Evolução Histórica (Nominal)")
+        st.line_chart(df['indice'])
 
-        with tab1:
-            m1, m2 = st.columns(2)
-            with m1:
-                st.markdown(f'<div class="metric-card"><div class="label">Total de Registros (Meses)</div><div class="value">{len(df_temporal)}</div></div>', unsafe_allow_html=True)
-            with m2:
-                st.markdown(f'<div class="metric-card"><div class="label">Período</div><div class="value">{df_temporal["data"].dt.year.min()} - {df_temporal["data"].dt.year.max()}</div></div>', unsafe_allow_html=True)
+        st.markdown("---")
+        col_box, col_dec = st.columns([1, 1])
 
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.dataframe(df_temporal, use_container_width=True)
-            
-            csv = df_temporal.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("⬇️ Baixar Série Temporal (CSV)", data=csv, file_name="fipezap_curitiba_serie_temporal.csv", mime="text/csv")
-
-        with tab2:
-            st.subheader("1. Evolução Nominal e Retornos")
-            
-            # Cálculo de variações
-            var_total = (df_ts['indice'].iloc[-1] / df_ts['indice'].iloc[0] - 1) * 100
-            df_ts['retorno_mensal'] = df_ts['indice'].pct_change() * 100
-            
-            col1, col2 = st.columns(2)
-            col1.metric("Variação Acumulada Total", f"{var_total:.2f}%")
-            col2.metric("Último Retorno Mensal", f"{df_ts['retorno_mensal'].iloc[-1]:.2f}%")
-
-            # Gráfico Nativo do Streamlit para Evolução
-            st.line_chart(df_ts['indice'])
-
-            st.markdown("---")
-            st.subheader("2. Análise de Sazonalidade (Boxplot)")
-            
-            df_box = df_ts.copy().dropna()
-            df_box['mes'] = df_box.index.month
-            
-            fig_box, ax_box = plt.subplots(figsize=(10, 5))
-            df_box.boxplot(column='retorno_mensal', by='mes', ax=ax_box, grid=True)
-            plt.title('Distribuição de Retornos Mensais')
-            plt.suptitle('') 
-            plt.xlabel('Mês')
-            plt.ylabel('Variação %')
+        with col_box:
+            st.subheader("Sazonalidade Mensal")
+            df_ret = df.copy()
+            df_ret['retorno'] = df_ret['indice'].pct_change() * 100
+            df_ret['mes'] = df_ret.index.month
+            fig_box, ax_box = plt.subplots()
+            df_ret.dropna().boxplot(column='retorno', by='mes', ax=ax_box)
+            ax_box.set_title("Variação % por Mês")
+            plt.suptitle("")
             st.pyplot(fig_box)
 
-            st.markdown("---")
-            st.subheader("3. Decomposição da Série Temporal")
-            
-            # Decomposição
-            decomposicao = seasonal_decompose(df_ts['indice'].dropna(), model='additive', period=12)
-            fig_dec = decomposicao.plot()
-            fig_dec.set_size_inches(12, 8)
+        with col_dec:
+            st.subheader("Decomposição (Componentes)")
+            dec = seasonal_decompose(df['indice'], model='additive', period=12)
+            fig_dec, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+            axes[0].plot(dec.trend, color='orange', label='Tendência')
+            axes[0].legend()
+            axes[1].plot(dec.seasonal, color='green', label='Sazonalidade')
+            axes[1].legend()
+            axes[2].scatter(df.index, dec.resid, alpha=0.5, label='Resíduo')
+            axes[2].legend()
             st.pyplot(fig_dec)
+    else:
+        st.error("Por favor, realize a 'Extração' de dados antes de acessar a análise.")
 
-            st.markdown("---")
-            st.subheader("4. Análise Estatística para Modelagem (IA/ARIMA)")
-            
-            col_adf, col_acf = st.columns([1, 1])
-            
-            with col_adf:
-                st.markdown("#### Teste de Estacionariedade (ADF)")
-                st.markdown("A série original é estacionária? Modelos como ARIMA e LSTM requerem ou assumem estacionariedade.")
-                
-                resultado_adf = adfuller(df_ts['indice'].dropna())
-                p_value = resultado_adf[1]
-                
-                st.write(f"**Estatística do Teste:** {resultado_adf[0]:.4f}")
-                st.write(f"**P-Value:** {p_value:.4f}")
-                
-                if p_value < 0.05:
-                    st.success("✅ O p-value é menor que 0.05. Rejeitamos a hipótese nula. A série é **Estacionária**.")
-                else:
-                    st.error("❌ O p-value é maior que 0.05. Falhamos em rejeitar a hipótese nula. A série **NÃO é Estacionária** (Possui raiz unitária). Será necessário aplicar diferenciação (`df.diff()`) antes de modelar.")
-
-            with col_acf:
-                st.markdown("#### Autocorrelação (ACF e PACF)")
-                fig_acf, (ax_acf, ax_pacf) = plt.subplots(2, 1, figsize=(8, 6))
-                
-                plot_acf(df_ts['indice'].dropna(), ax=ax_acf, lags=24, title="Função de Autocorrelação (ACF) - Lags p/ MA(q)")
-                plot_pacf(df_ts['indice'].dropna(), ax=ax_pacf, lags=24, title="Autocorrelação Parcial (PACF) - Lags p/ AR(p)")
-                
-                plt.tight_layout()
-                st.pyplot(fig_acf)
+# ─── ETAPA 3: MODELAGEM ──────────────────────────────────────────────────────
+elif app_mode == "Modelagem":
+    st.title("🤖 Modelagem Preditiva")
+    if st.session_state.df_fipe is not None:
+        st.info("Espaço reservado para implementação dos modelos SARIMAX, LSTM e XGBoost.")
+        st.write("Dados prontos para processamento:", st.session_state.df_fipe.shape)
+        # Próximos passos: Teste de Estacionariedade, Train/Test Split, etc.
+    else:
+        st.error("Dados não encontrados para modelagem.")
