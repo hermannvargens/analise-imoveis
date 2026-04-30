@@ -40,14 +40,42 @@ st.markdown("""
 st.markdown("""
 <div class="hero">
     <h1>🏠 FipeZap · Curitiba</h1>
-    <p>Extração automatizada do Índice FipeZap — Leitura direta do HTML</p>
+    <p>Extração automatizada e modelagem de série temporal</p>
 </div>
 """, unsafe_allow_html=True)
 
-# ─── Scraping Direto no DOM Principal ───────────────────────────────────────
-async def extrair_fipe_curitiba(info_type: str, log_container, image_container):
+# ─── Funções de Processamento ───────────────────────────────────────────────
+def limpar_dados_fipe(lista_tabelas):
+    dfs_processados = []
+    meses_map = {
+        'jan': 1, 'fev': 2, 'mar': 3, 'abr': 4, 'mai': 5, 'jun': 6,
+        'jul': 7, 'ago': 8, 'set': 9, 'out': 10, 'nov': 11, 'dez': 12
+    }
+    
+    ano_corrente = 2026
+    
+    for df in lista_tabelas:
+        temp_df = df.copy()
+        temp_df['mes_num'] = temp_df['Mês'].str.lower().map(meses_map)
+        temp_df['Ano'] = ano_corrente
+        dfs_processados.append(temp_df)
+        ano_corrente -= 1 
+
+    df_final = pd.concat(dfs_processados, ignore_index=True)
+    df_final['data'] = pd.to_datetime(df_final['Ano'].astype(str) + '-' + df_final['mes_num'].astype(str) + '-01')
+    
+    df_series = df_final[['data', 'Curitiba']].copy()
+    df_series = df_series.sort_values('data').reset_index(drop=True)
+    df_series.columns = ['data', 'indice']
+    
+    # Converte strings com vírgula para floats para permitir operações matemáticas
+    df_series['indice'] = df_series['indice'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False).astype(float)
+    
+    return df_series
+
+async def extrair_fipe_curitiba(info_type: str, log_container):
     async with async_playwright() as p:
-        log_container.info("🚀 Iniciando Chromium...")
+        log_container.info("🚀 Iniciando extração no Chromium...")
         browser = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
@@ -55,53 +83,37 @@ async def extrair_fipe_curitiba(info_type: str, log_container, image_container):
         
         page = await browser.new_page(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
         )
         
         try:
-            log_container.info("🌐 Acessando FIPE...")
             await page.goto("https://www.fipe.org.br/pt-br/indices/fipezap/#indice-mensal", wait_until="networkidle", timeout=60_000)
 
-            # Preenchimento com pausas forçadas de 1.5s
-            log_container.info("🖱️ 1/4 - Selecionando Tipo: Venda...")
             await page.wait_for_selector("#Tipo_chosen", timeout=20_000)
             await page.click("#Tipo_chosen")
             await page.locator("#Tipo_chosen .chosen-results li").get_by_text("Venda", exact=True).click()
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(1000)
 
-            log_container.info(f"🖱️ 2/4 - Selecionando Informação: {info_type}...")
             await page.click("#Info_chosen")
             await page.locator("#Info_chosen .chosen-results li").get_by_text(info_type, exact=True).click()
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(1000)
 
-            log_container.info("📍 3/4 - Selecionando Região: Curitiba...")
             await page.click("#Regiao_chosen")
             await page.locator("#Regiao_chosen input").fill("Curitiba")
-            await page.wait_for_timeout(500) # Pausa rápida para a busca do site renderizar a lista
+            await page.wait_for_timeout(500) 
             await page.locator("#Regiao_chosen .chosen-results li").get_by_text("Curitiba", exact=True).click()
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(1000)
 
-            log_container.info("🛏️ 4/4 - Selecionando Dormitórios: Todos...")
             await page.click("#Dormitorios_chosen")
             await page.locator("#Dormitorios_chosen .chosen-results li").get_by_text("Todos", exact=True).click()
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(1000)
 
-            log_container.info("📸 Verificando preenchimento...")
-            screenshot_bytes = await page.screenshot(full_page=True)
-            image_container.image(screenshot_bytes, caption="Formulário preenchido. Iniciando pesquisa...")
-
-            log_container.info("🔍 Pesquisando resultados...")
+            log_container.info("🔍 Processando pesquisa...")
             await page.click("#buttonPesquisar", force=True)
             
-            log_container.info("⏳ Aguardando renderização das tabelas no HTML...")
-            # Aguarda especificamente as tabelas de resultado aparecerem no DOM
             await page.wait_for_selector("table.results", state="visible", timeout=30_000)
-            await page.wait_for_timeout(2000) # Tempo de segurança para o DOM terminar de injetar todos os anos
+            await page.wait_for_timeout(2000) 
 
-            log_container.info("✅ Extraindo tabelas diretamente da página principal...")
             html_content = await page.content()
-
-            # Extrai apenas as tabelas que contêm a classe CSS 'results'
             tabelas = pd.read_html(io.StringIO(html_content), attrs={"class": "results"})
             
             await browser.close()
@@ -109,9 +121,6 @@ async def extrair_fipe_curitiba(info_type: str, log_container, image_container):
             return tabelas
 
         except Exception as e:
-            log_container.error("Falha na extração. Capturando estado atual do navegador...")
-            erro_bytes = await page.screenshot(full_page=True)
-            image_container.image(erro_bytes, caption="Tela no momento da falha")
             await browser.close()
             raise e
 
@@ -119,51 +128,48 @@ async def extrair_fipe_curitiba(info_type: str, log_container, image_container):
 with st.sidebar:
     info_type = st.selectbox("Tipo de informação", ["Número Índice", "Variação Mensal"])
 
-run = st.button("🔍 Extrair dados agora", use_container_width=True, type="primary")
-
+run = st.button("🔍 Extrair e Processar Série Temporal", use_container_width=True, type="primary")
 log_placeholder = st.empty()
-image_placeholder = st.empty()
 
 if run:
-    with st.spinner("Executando automação via Playwright..."):
+    with st.spinner("Executando extração..."):
         try:
-            tabelas = asyncio.run(extrair_fipe_curitiba(info_type, log_placeholder, image_placeholder))
+            tabelas_brutas = asyncio.run(extrair_fipe_curitiba(info_type, log_placeholder))
         except Exception as e:
             st.error(f"❌ Erro: {e}")
-            tabelas = None
+            tabelas_brutas = None
 
-    if tabelas:
-        st.success(f"✅ {len(tabelas)} tabela(s) capturada(s)!")
+    if tabelas_brutas:
+        # Aplica a função de limpeza na lista de tabelas capturadas
+        df_temporal = limpar_dados_fipe(tabelas_brutas)
+        
+        st.success("✅ Série temporal estruturada com sucesso!")
 
-        df_total = pd.concat(tabelas, ignore_index=True)
-        m1, m2, m3 = st.columns(3)
-        for col, label, val in zip(
-            [m1, m2, m3],
-            ["Total de Tabelas", "Linhas Totais", "Colunas"],
-            [len(tabelas), len(df_total), df_total.shape[1]],
-        ):
-            with col:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="label">{label}</div>
-                    <div class="value">{val}</div>
-                </div>""", unsafe_allow_html=True)
+        m1, m2 = st.columns(2)
+        with m1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="label">Total de Registros (Meses)</div>
+                <div class="value">{len(df_temporal)}</div>
+            </div>""", unsafe_allow_html=True)
+        with m2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="label">Período</div>
+                <div class="value">{df_temporal['data'].dt.year.min()} - {df_temporal['data'].dt.year.max()}</div>
+            </div>""", unsafe_allow_html=True)
 
-        st.markdown("---")
-        for i, t in enumerate(tabelas):
-            # O site ordena por ano decrescente, o primeiro item costuma ser o ano atual
-            ano_estimado = 2026 - i 
-            with st.expander(f"📋 Dados do ano ~{ano_estimado} (Tabela {i + 1})", expanded=(i == 0)):
-                st.dataframe(t, use_container_width=True)
-                
-        st.markdown("---")
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            for i, t in enumerate(tabelas):
-                t.to_excel(writer, sheet_name=f"Tabela_{i + 1}", index=False)
+        st.markdown("### 📈 Visualização")
+        # Exibe um gráfico nativo do Streamlit utilizando a data como índice
+        st.line_chart(df_temporal.set_index('data'), y='indice')
+
+        st.markdown("### 📋 DataFrame Final")
+        st.dataframe(df_temporal, use_container_width=True)
+        
+        csv = df_temporal.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
-            label="⬇️ Baixar todas as tabelas (Excel)",
-            data=buf.getvalue(),
-            file_name="fipezap_curitiba_completo.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            label="⬇️ Baixar Série Temporal (CSV)",
+            data=csv,
+            file_name="fipezap_curitiba_serie_temporal.csv",
+            mime="text/csv",
         )
