@@ -55,21 +55,49 @@ def limpar_dados_fipe(lista_tabelas):
     ano_corrente = 2026
     
     for df in lista_tabelas:
+        # Pula tabelas que não tenham pelo menos 2 colunas
+        if df.empty or df.shape[1] < 2:
+            continue
+            
         temp_df = df.copy()
-        temp_df['mes_num'] = temp_df['Mês'].str.lower().map(meses_map)
+        
+        # Seleciona apenas as duas primeiras colunas e força novos nomes (evita KeyError)
+        temp_df = temp_df.iloc[:, [0, 1]]
+        temp_df.columns = ['mes_str', 'valor']
+        
+        # Limpa o texto da coluna de meses e mapeia para número
+        temp_df['mes_num'] = temp_df['mes_str'].astype(str).str.lower().str.strip().map(meses_map)
+        
+        # Remove linhas onde o mês não foi reconhecido (ex: cabeçalhos extras no meio da tabela)
+        temp_df = temp_df.dropna(subset=['mes_num'])
+        
+        # Se a tabela ficou vazia após a limpeza, pula para a próxima
+        if temp_df.empty:
+            continue
+            
+        temp_df['mes_num'] = temp_df['mes_num'].astype(int)
         temp_df['Ano'] = ano_corrente
+        
         dfs_processados.append(temp_df)
         ano_corrente -= 1 
 
+    if not dfs_processados:
+        raise ValueError("Nenhuma tabela válida de dados foi encontrada após a filtragem.")
+
+    # Concatena e cria a coluna de data
     df_final = pd.concat(dfs_processados, ignore_index=True)
     df_final['data'] = pd.to_datetime(df_final['Ano'].astype(str) + '-' + df_final['mes_num'].astype(str) + '-01')
     
-    df_series = df_final[['data', 'Curitiba']].copy()
+    # Organiza a série temporal final
+    df_series = df_final[['data', 'valor']].copy()
     df_series = df_series.sort_values('data').reset_index(drop=True)
     df_series.columns = ['data', 'indice']
     
-    # Converte strings com vírgula para floats para permitir operações matemáticas
-    df_series['indice'] = df_series['indice'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False).astype(float)
+    # Tratamento numérico robusto (remove pontos de milhar, troca vírgula por ponto)
+    df_series['indice'] = df_series['indice'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+    
+    # Usa expressão regular para extrair apenas o número, ignorando eventuais asteriscos ou textos
+    df_series['indice'] = df_series['indice'].str.extract(r'(\d+\.?\d*)').astype(float)
     
     return df_series
 
