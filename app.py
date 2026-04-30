@@ -5,6 +5,7 @@ import io
 import asyncio
 import subprocess
 import sys
+import requests
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -23,7 +24,7 @@ def install_chromium():
 
 install_chromium()
 
-# ─── Funções de Suporte (Scraping e Limpeza) ──────────────────────────────────
+# ─── Funções de Dados (FIPE e SGS do BCB) ───────────────────────────────────
 def limpar_dados_fipe(lista_tabelas):
     dfs_processados = []
     meses_map = {'jan': 1, 'fev': 2, 'mar': 3, 'abr': 4, 'mai': 5, 'jun': 6, 'jul': 7, 'ago': 8, 'set': 9, 'out': 10, 'nov': 11, 'dez': 12}
@@ -72,6 +73,16 @@ async def extrair_fipe_curitiba(log_container):
             await browser.close()
             raise e
 
+@st.cache_data(show_spinner=False)
+def buscar_dados_sgs(codigo):
+    """Busca dados da API do Banco Central (SGS) e retorna um DataFrame formatado."""
+    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados?formato=json"
+    response = requests.get(url)
+    df = pd.read_json(io.StringIO(response.text))
+    df['data'] = pd.to_datetime(df['data'], dayfirst=True)
+    df['valor'] = pd.to_numeric(df['valor']) / 100 
+    return df
+
 # ─── Inicialização do Estado ──────────────────────────────────────────────────
 st.set_page_config(page_title="FipeZap Analytics", page_icon="🏠", layout="wide")
 
@@ -83,7 +94,7 @@ if 'pinned_model' not in st.session_state:
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🏠 Menu")
-    app_mode = st.radio("Selecione uma etapa:", ["Extração", "Análise Exploratória (EDA)", "Modelagem"])
+    app_mode = st.radio("Selecione uma etapa:", ["Extração", "Análise Exploratória (EDA)", "Análise de Valor Real", "Modelagem"])
     st.markdown("---")
     st.info("Foco: Curitiba | Venda | Número Índice")
 
@@ -114,7 +125,79 @@ elif app_mode == "Análise Exploratória (EDA)":
         st.pyplot(dec.plot())
     else: st.warning("Extraia os dados primeiro.")
 
-# ─── ETAPA 3: MODELAGEM (SARIMA) ─────────────────────────────────────────────
+# ─── ETAPA 3: ANÁLISE DE VALOR REAL E CUSTO DE OPORTUNIDADE ──────────────────
+elif app_mode == "Análise de Valor Real":
+    st.markdown("## 💰 Análise de Valor Real e Custo de Oportunidade")
+    
+    if st.session_state.df_fipe is not None:
+        with st.spinner("Consultando dados do Banco Central (IPCA e CDI)..."):
+            df_fipe = st.session_state.df_fipe.copy()
+            
+            # Buscar indicadores econômicos (SGS BCB)
+            df_ipca = buscar_dados_sgs(433).rename(columns={'valor': 'ipca_mensal'})
+            df_cdi = buscar_dados_sgs(4391).rename(columns={'valor': 'cdi_mensal'})
+            
+            # Ajustar datas para dia 1 (para cruzar com FIPE que setamos dia 1)
+            df_ipca['data'] = df_ipca['data'].dt.to_period('M').dt.to_timestamp()
+            df_cdi['data'] = df_cdi['data'].dt.to_period('M').dt.to_timestamp()
+
+            # Merge Geral (Inner para garantir que temos todos os dados naquele mês)
+            df = pd.merge(df_fipe, df_ipca, on='data', how='inner')
+            df = pd.merge(df, df_cdi, on='data', how='inner')
+            df = df.sort_values('data')
+
+            # --- Cálculos Base 100 e Inflação ---
+            df['ipca_acumulado'] = (1 + df['ipca_mensal']).cumprod()
+            df['ipca_indice_base100'] = df['ipca_acumulado'] * (100 / df['ipca_acumulado'].iloc[0])
+            df['indice_real'] = (df['indice'] / df['ipca_indice_base100']) * 100
+            
+            df['cdi_acumulado'] = (1 + df['cdi_mensal']).cumprod()
+            df['indice_cdi_base100'] = df['cdi_acumulado'] * (100 / df['cdi_acumulado'].iloc[0])
+
+            # Normalização para Base 100 (partindo do mesmo ponto)
+            for col in ['indice', 'indice_real']:
+                df[f'{col}_n'] = (df[col] / df[col].iloc[0]) * 100
+
+        # --- Gráfico 1: Curva Nominal vs Real ---
+        st.subheader("1. Evolução Imobiliária (Nominal vs. Real)")
+        st.markdown("Descontando a inflação (IPCA), o imóvel teve ganho real?")
+        
+        fig1 = go.Figure()
+        fig1.add_trace(go.Scatter(x=df['data'], y=df['indice_real_n'], mode='lines', name='Valor Real (Ajustado IPCA)', line=dict(color='green')))
+        # Preenchimento entre as linhas para evidenciar o efeito da inflação
+        fig1.add_trace(go.Scatter(x=df['data'], y=df['indice_n'], mode='lines', name='Valor Nominal', fill='tonexty', fillcolor='rgba(128,128,128,0.2)', line=dict(color='blue')))
+        fig1.update_layout(height=400, hovermode="x unified", margin=dict(l=0, r=0, t=30, b=0))
+        st.plotly_chart(fig1, use_container_width=True)
+
+        st.markdown("---")
+        
+        # --- Gráfico 2: Retorno Total vs CDI ---
+        st.subheader("2. Imóvel (Retorno Total) vs. Benchmarks (CDI)")
+        
+        # Slider interativo para o yield do aluguel
+        yield_anual = st.slider("Taxa de Aluguel Líquido Estimada (% a.a.)", min_value=1.0, max_value=10.0, value=3.5, step=0.1) / 100
+        yield_mensal = (1 + yield_anual)**(1/12) - 1
+
+        df['valorizacao_mensal'] = df['indice'].pct_change().fillna(0)
+        df['retorno_total_mensal'] = (1 + df['valorizacao_mensal']) * (1 + yield_mensal) - 1
+        df['imovel_total_return'] = (1 + df['retorno_total_mensal']).cumprod() * 100
+        
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=df['data'], y=df['indice_cdi_base100'], mode='lines', name='CDI (Custo de Oportunidade)', line=dict(color='orange', dash='dash', width=2)))
+        fig2.add_trace(go.Scatter(x=df['data'], y=df['imovel_total_return'], mode='lines', name=f'Retorno Total (Preço + Aluguel {(yield_anual*100):.1f}% a.a.)', line=dict(color='green', width=3)))
+        fig2.add_trace(go.Scatter(x=df['data'], y=df['indice_n'], mode='lines', name='Apenas Valorização Nominal', line=dict(color='blue', width=1.5)))
+        
+        # Opcional: Escala Log
+        escala_log = st.checkbox("Usar Escala Logarítmica (Melhor para visualizar juros compostos)", value=True)
+        if escala_log:
+            fig2.update_yaxes(type="log")
+            
+        fig2.update_layout(height=500, hovermode="x unified", margin=dict(l=0, r=0, t=30, b=0), yaxis_title="Evolução do Capital (Base 100)")
+        st.plotly_chart(fig2, use_container_width=True)
+        
+    else: st.warning("Realize a Extração antes de acessar a análise econômica.")
+
+# ─── ETAPA 4: MODELAGEM (SARIMA) ─────────────────────────────────────────────
 elif app_mode == "Modelagem":
     st.markdown("## 🤖 Ambiente de Experimentação SARIMA")
     
@@ -122,15 +205,10 @@ elif app_mode == "Modelagem":
         df_raw = st.session_state.df_fipe.copy()
         df_raw.set_index('data', inplace=True)
         
-        # --- Painel Lateral de Configurações ---
         with st.sidebar:
             st.markdown("### ⚙️ Configurações da Série")
-            
-            # Filtro de Data
             min_d, max_d = df_raw.index.min().date(), df_raw.index.max().date()
             start_date, end_date = st.date_input("Período de Análise", [min_d, max_d], min_value=min_d, max_value=max_d)
-            
-            # Tratamento de Outliers
             suavizar = st.checkbox("Suavizar Picos (Média Móvel 3m)")
             
             st.markdown("### 🪟 Divisão Treino/Teste")
@@ -142,30 +220,23 @@ elif app_mode == "Modelagem":
                 p = c1.number_input("p (AR)", 0, 5, 1)
                 d = c2.number_input("d (I)", 0, 2, 1)
                 q = c3.number_input("q (MA)", 0, 5, 1)
-                
                 c4, c5, c6 = st.columns(3)
                 P = c4.number_input("P (Seasonal)", 0, 3, 0)
                 D = c5.number_input("D (Seasonal)", 0, 2, 0)
                 Q = c6.number_input("Q (Seasonal)", 0, 3, 0)
-                S = st.number_input("S (Períodos/Ciclo)", 0, 24, 12)
-                
+                S = st.number_input("S (Períodos)", 0, 24, 12)
                 btn_manual = st.form_submit_button("Aplicar Parâmetros Manuais")
             
             st.markdown("---")
             btn_auto = st.button("🚀 Auto-Fit (pmdarima)", use_container_width=True)
 
-        # --- Processamento dos Dados ---
-        # Aplica filtro de data
         df = df_raw.loc[pd.to_datetime(start_date):pd.to_datetime(end_date)].copy()
-        
-        # Aplica Suavização
         if suavizar:
             df['indice'] = df['indice'].rolling(window=3, center=True).mean().bfill().ffill()
 
         train = df['indice'].iloc[:-test_size]
         test = df['indice'].iloc[-test_size:]
 
-        # --- Lógica de Execução ---
         executar_modelo = False
         order = (p, d, q)
         seasonal_order = (P, D, Q, S)
@@ -182,7 +253,7 @@ elif app_mode == "Modelagem":
 
         if btn_manual or executar_modelo or ('last_order' in st.session_state):
             if not executar_modelo and 'last_order' in st.session_state:
-                if not btn_manual: # Usa o estado salvo apenas se não clicou em nada
+                if not btn_manual: 
                     order = st.session_state.last_order
                     seasonal_order = st.session_state.last_seasonal
             
@@ -195,7 +266,6 @@ elif app_mode == "Modelagem":
                     st.session_state.last_order = order
                     st.session_state.last_seasonal = seasonal_order
                     
-                    # Salva previsões atuais para fixação
                     current_preds = {
                         'mean': pred_df['mean'],
                         'lower': pred_df['mean_ci_lower'],
@@ -203,14 +273,12 @@ elif app_mode == "Modelagem":
                         'label': f"SARIMA {order}x{seasonal_order}"
                     }
                     
-                    # --- Métricas em Tempo Real ---
                     mape = mean_absolute_percentage_error(test, pred_df['mean'])
                     rmse = np.sqrt(mean_squared_error(test, pred_df['mean']))
                     mae = mean_absolute_error(test, pred_df['mean'])
                     
                     st.markdown("### 📊 Dashboard de Performance")
                     st.caption(f"Configuração Atual: SARIMA {order} x {seasonal_order}")
-                    
                     m1, m2, m3, m4, m5 = st.columns(5)
                     m1.metric("RMSE", f"{rmse:.2f}")
                     m2.metric("MAE", f"{mae:.2f}")
@@ -218,32 +286,21 @@ elif app_mode == "Modelagem":
                     m4.metric("AIC", f"{modelo.aic:.1f}")
                     m5.metric("BIC", f"{modelo.bic:.1f}")
                     
-                    # --- Ação: Fixar Modelo ---
                     if st.button("📌 Fixar Modelo Atual para Comparação"):
                         st.session_state.pinned_model = current_preds
                         st.success("Modelo fixado! Altere os parâmetros para comparar.")
 
-                    # --- Visualização Principal (Plotly) ---
                     st.markdown("---")
                     st.markdown("### 📈 Real vs Predição")
-                    
                     fig = go.Figure()
-                    
-                    # Linha de Treino
-                    fig.add_trace(go.Scatter(x=train.index[-24:], y=train.values[-24:], mode='lines', name='Treino (Últimos 24m)', line=dict(color='gray')))
-                    
-                    # Linha Real do Teste
+                    fig.add_trace(go.Scatter(x=train.index, y=train.values, mode='lines', name='Treino (Completo)', line=dict(color='gray')))
                     fig.add_trace(go.Scatter(x=test.index, y=test.values, mode='lines+markers', name='Real (Teste)', line=dict(color='blue', width=3)))
                     
-                    # Se houver um modelo fixado, plota ele antes
                     if st.session_state.pinned_model:
                         pinned = st.session_state.pinned_model
                         fig.add_trace(go.Scatter(x=test.index, y=pinned['mean'], mode='lines', name=f"Fixado: {pinned['label']}", line=dict(color='orange', dash='dot')))
                     
-                    # Linha do Modelo Atual
                     fig.add_trace(go.Scatter(x=test.index, y=pred_df['mean'], mode='lines', name=f"Atual: {current_preds['label']}", line=dict(color='red')))
-                    
-                    # Intervalo de Confiança do Modelo Atual
                     fig.add_trace(go.Scatter(x=test.index.tolist() + test.index[::-1].tolist(),
                                              y=pred_df['mean_ci_upper'].tolist() + pred_df['mean_ci_lower'][::-1].tolist(),
                                              fill='toself', fillcolor='rgba(255,0,0,0.2)', line=dict(color='rgba(255,255,255,0)'),
@@ -252,36 +309,24 @@ elif app_mode == "Modelagem":
                     fig.update_layout(height=500, margin=dict(l=0, r=0, t=30, b=0), hovermode="x unified")
                     st.plotly_chart(fig, use_container_width=True)
 
-                    # --- Gráficos de Diagnóstico Interativos ---
                     st.markdown("---")
                     st.markdown("### 🔬 Diagnóstico de Resíduos")
-                    
-                    residuos = modelo.resid[1:] # Descarta o primeiro resíduo
-                    
+                    residuos = modelo.resid[1:]
                     col_hist, col_corr = st.columns([1, 1])
-                    
                     with col_hist:
                         fig_hist = go.Figure(data=[go.Histogram(x=residuos, nbinsx=20, marker_color='#3498db')])
                         fig_hist.update_layout(title="Distribuição dos Resíduos (Normalidade)", height=300, margin=dict(l=0, r=0, t=30, b=0))
                         st.plotly_chart(fig_hist, use_container_width=True)
-                        
                     with col_corr:
-                        # Calculando ACF e PACF
                         acf_vals = acf(residuos, nlags=20)
                         pacf_vals = pacf(residuos, nlags=20)
-                        
                         fig_corr = make_subplots(rows=2, cols=1, subplot_titles=("Autocorrelação (ACF)", "Autocorrelação Parcial (PACF)"), vertical_spacing=0.15)
-                        
                         fig_corr.add_trace(go.Bar(x=np.arange(len(acf_vals)), y=acf_vals, marker_color='red', name='ACF'), row=1, col=1)
                         fig_corr.add_trace(go.Bar(x=np.arange(len(pacf_vals)), y=pacf_vals, marker_color='green', name='PACF'), row=2, col=1)
-                        
-                        # Linhas de significância (Aproximadas para 95% de confiança)
                         conf_level = 1.96 / np.sqrt(len(residuos))
-                        fig_corr.add_hline(y=conf_level, line_dash="dash", line_color="black", opacity=0.5, row=1, col=1)
-                        fig_corr.add_hline(y=-conf_level, line_dash="dash", line_color="black", opacity=0.5, row=1, col=1)
-                        fig_corr.add_hline(y=conf_level, line_dash="dash", line_color="black", opacity=0.5, row=2, col=1)
-                        fig_corr.add_hline(y=-conf_level, line_dash="dash", line_color="black", opacity=0.5, row=2, col=1)
-
+                        for row in [1, 2]:
+                            fig_corr.add_hline(y=conf_level, line_dash="dash", line_color="black", opacity=0.5, row=row, col=1)
+                            fig_corr.add_hline(y=-conf_level, line_dash="dash", line_color="black", opacity=0.5, row=row, col=1)
                         fig_corr.update_layout(height=400, showlegend=False, margin=dict(l=0, r=0, t=30, b=0))
                         st.plotly_chart(fig_corr, use_container_width=True)
 
@@ -289,5 +334,4 @@ elif app_mode == "Modelagem":
                     st.error(f"Erro ao ajustar o modelo com os parâmetros selecionados: {e}")
         else:
             st.info("👆 Selecione os parâmetros manuais ou clique em Auto-Fit para iniciar a modelagem.")
-    else:
-        st.error("Realize a Extração antes de acessar a modelagem.")
+    else: st.error("Realize a Extração antes de acessar a modelagem.")
