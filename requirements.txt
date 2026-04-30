@@ -6,3 +6,5 @@ lxml>=5.2.0
 matplotlib>=3.8.0
 statsmodels>=0.14.0
 scipy>=1.12.0
+pmdarima>=2.0.4
+scikit-learn>=1.4.0
